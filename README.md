@@ -1,5 +1,7 @@
 # Narrator: free PDF-to-audiobook
 
+**Open it:** https://bimbus888.github.io/narrator/
+
 Turn a PDF into an audiobook on your own device and listen offline. No accounts, no subscriptions, no paid APIs. Your PDFs and audio never leave your device.
 
 ## How it works (one paragraph)
