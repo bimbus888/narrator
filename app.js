@@ -59,7 +59,7 @@ const position = b => Number(ls.get('pos:' + b.id)) || 0;
 function bookState(b) {
   if (gen?.bookId === b.id) {
     const left = gen.eta ? ` · about ${fmtTime(gen.eta)} left` : '';
-    return `<div class="bar"><i style="width:${pct(b.done, b.total)}%"></i></div>
+    return `<div class="bar"><i style="width:${gen.pct ?? 0}%"></i></div>
       <div class="muted">${esc(gen.msg || `Generating ${pct(b.done, b.total)}%`)}${left}</div>
       <div class="row"><button data-act="stop" data-id="${b.id}">${gen.stop ? 'Pausing…' : 'Pause'}</button></div>`;
   }
@@ -178,6 +178,7 @@ function ask(msg) {
     worker.onmessage = ({ data: m }) => {
       if (m.type === 'load' && gen) { gen.msg = `Loading the voice (downloaded once, then kept on this device)… ${Math.round(m.progress)}%`; throttledRender(); }
       if (m.type === 'device') console.info('Voice engine running on', m.device);
+      if (m.type === 'progress' && gen?.t0) { gen.charsDone += m.chars; showProgress(); }
       if (m.type === 'ready' || m.type === 'done' || m.type === 'error') { waiting.get(m.id)?.(m); waiting.delete(m.id); }
     };
     worker.onerror = e => { // worker crashed (e.g. out of memory): fail everything pending, start fresh next time
@@ -189,6 +190,16 @@ function ask(msg) {
   return new Promise(res => { waiting.set(id, res); worker.postMessage({ ...msg, id }); });
 }
 const loadModel = () => ask({ type: 'load' }).then(m => { if (m.type === 'error') throw new Error(m.message); });
+
+// percentage, audio ready so far and time left, updated after every sentence
+function showProgress() {
+  const { book, t0, charsDone, charsAll, charsBefore } = gen;
+  gen.pct = (100 * (charsBefore + charsDone)) / charsAll;
+  const elapsed = performance.now() - t0;   // first sentences include GPU warm-up, so wait before estimating
+  gen.eta = charsDone && elapsed > 60000 ? (elapsed / charsDone) * (charsAll - charsBefore - charsDone) / 1000 : 0;
+  gen.msg = `Generating ${gen.pct.toFixed(1)}%${book.seconds ? ` · ${fmtTime(book.seconds)} of audio ready` : ''}`;
+  throttledRender();
+}
 
 let renderTimer;
 const throttledRender = () => { if (!renderTimer) renderTimer = setTimeout(() => { renderTimer = null; if (view === 'library') render(); }, 500); };
@@ -208,12 +219,15 @@ async function generate(bookId) {
     const book = await getBook(bookId);
     const todo = (await getChunks(bookId)).filter(c => c.status !== 'done');
     book.failed = 0;
-    let charsLeft = todo.reduce((n, c) => n + c.chars, 0), charsDone = 0;
-    const t0 = performance.now();
+    const all = await getChunks(bookId);
+    Object.assign(gen, {
+      book, t0: performance.now(), charsDone: 0,
+      charsAll: all.reduce((n, c) => n + c.chars, 0),
+      charsBefore: all.reduce((n, c) => n + (c.status === 'done' ? c.chars : 0), 0),
+    });
+    showProgress();
     for (const c of todo) {
       if (gen.stop) break;
-      gen.msg = `Generating ${pct(book.done, book.total)}% (part ${c.idx + 1} of ${book.total})`;
-      throttledRender();
       const r = await ask({ type: 'chunk', parts: c.parts, heading: c.heading, voice: book.voice });
       if (r.blob) {
         Object.assign(c, { status: 'done', bytes: r.blob.size, seconds: mp3Seconds(r.blob.size), error: null });
@@ -225,8 +239,6 @@ async function generate(bookId) {
         await tx(['chunks', 'books'], 'readwrite', (cs, bs) => { cs.put(c); bs.put(book); });
         console.warn('chunk failed', c.idx, r.message);
       }
-      charsDone += c.chars; charsLeft -= c.chars;
-      gen.eta = (performance.now() - t0) / 1000 / charsDone * charsLeft;
     }
     status(book.done === book.total ? `“${book.title}” is ready and saved on this device. ✓` : book.failed ? `${book.failed} part(s) failed. Tap “Retry failed parts”.` : 'Generation paused. You can resume any time.', book.failed ? 'bad' : 'ok');
   } catch (e) {

@@ -40,6 +40,7 @@ onmessage = async ({ data: m }) => {
       const { audio } = await tts.generate(m.parts[i], { voice: m.voice, speed: 0.95 });
       push(toInt16(audio));
       push(new Int16Array(Math.round(SAMPLE_RATE * (i === 0 && m.heading ? 1.0 : 0.25)))); // pause between sentences
+      postMessage({ type: 'progress', id: m.id, chars: m.parts[i].length });
     }
     mp3.push(encoder.flush());
     postMessage({ type: 'done', id: m.id, blob: new Blob(mp3, { type: 'audio/mpeg' }) });
