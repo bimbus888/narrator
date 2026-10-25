@@ -6,7 +6,7 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdf.worker.min.mjs', imp
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 const audio = $('#audio');
-const VOICES = { bm_george: 'George (British male, default)', bm_fable: 'Fable (British male)', bm_lewis: 'Lewis (British male, deeper)', bm_daniel: 'Daniel (British male)', bf_emma: 'Emma (British female)', bf_isabella: 'Isabella (British female)' };
+const VOICES = { bm_lewis: 'Lewis (British male, deeper, default)', bm_george: 'George (British male)', bm_fable: 'Fable (British male)', bm_daniel: 'Daniel (British male)', bf_emma: 'Emma (British female)', bf_isabella: 'Isabella (British female)' };
 const SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2, 2.5];
 const ls = { get: k => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} }, del: k => { try { localStorage.removeItem(k); } catch {} } };
 
@@ -61,6 +61,7 @@ function bookState(b) {
     const left = gen.eta ? ` · about ${fmtTime(gen.eta)} left` : '';
     return `<div class="bar"><i style="width:${gen.pct ?? 0}%"></i></div>
       <div class="muted">${esc(gen.msg || `Generating ${pct(b.done, b.total)}%`)}${left}</div>
+      ${queuedCount() ? `<div class="muted">Then ${queuedCount()} more book${queuedCount() > 1 ? 's' : ''} in the queue.</div>` : ''}
       <div class="row"><button data-act="stop" data-id="${b.id}">${gen.stop ? 'Pausing…' : 'Pause'}</button></div>`;
   }
   if (ready(b)) {
@@ -68,12 +69,16 @@ function bookState(b) {
     return `<div class="muted">${fmtTime(b.seconds)} · ${p ? pct(p, b.seconds) + '% listened' : 'Not started'}</div>
       <div class="ok muted">✓ Downloaded · plays offline</div>`;
   }
+  if (b.queued && gen) return `<div class="muted">Queued: starts automatically when the book before it finishes.</div>
+    <div class="row"><button data-act="unqueue" data-id="${b.id}">Remove from queue</button></div>`;
   const failed = b.failed ? `<div class="bad muted">${b.failed} part${b.failed > 1 ? 's' : ''} failed.</div>` : '';
   const voice = b.done ? '' : `<select data-act="voice" data-id="${b.id}" aria-label="Voice">${Object.entries(VOICES).map(([k, v]) => `<option value="${k}" ${k === b.voice ? 'selected' : ''}>${v}</option>`).join('')}</select>
       <button data-act="preview" data-id="${b.id}" ${gen ? 'disabled' : ''}>▶ Preview voice</button>`;
   return `${b.done ? `<div class="bar"><i style="width:${pct(b.done, b.total)}%"></i></div>` : ''}
     <div class="muted">${b.done ? `Audio ${pct(b.done, b.total)}% generated (paused)` : `${b.pages} pages · ${b.chapters.length} chapter${b.chapters.length > 1 ? 's' : ''} · audio not generated yet`}</div>${failed}
-    <div class="row">${voice}<button class="primary" data-act="gen" data-id="${b.id}" ${gen ? 'disabled' : ''}>${b.failed ? 'Retry failed parts' : b.done ? 'Resume generating' : 'Generate audio'}</button></div>`;
+    <div class="row">${voice}${gen
+      ? `<button class="primary" data-act="queue" data-id="${b.id}">Add to queue</button>`
+      : `<button class="primary" data-act="gen" data-id="${b.id}">${b.failed ? 'Retry failed parts' : b.done ? 'Resume generating' : 'Generate audio'}</button>`}</div>`;
 }
 
 function libraryHTML() {
@@ -158,7 +163,7 @@ async function addPdf(file) {
     cover = c.toDataURL('image/jpeg', 0.7);
   } catch (e) { console.warn('cover', e); }
   const id = crypto.randomUUID();
-  const book = { id, title, created: Date.now(), pages: pdf.numPages, voice: 'bm_george', cover, chapters, total: chunks.length, done: 0, failed: 0, bytes: 0, seconds: 0 };
+  const book = { id, title, created: Date.now(), pages: pdf.numPages, voice: 'bm_lewis', cover, chapters, total: chunks.length, done: 0, failed: 0, bytes: 0, seconds: 0 };
   await tx(['books', 'chunks', 'pdfs'], 'readwrite', (bs, cs, ps) => {
     bs.put(book);
     chunks.forEach((c, idx) => cs.put({ bookId: id, idx, ...c, chars: c.parts.join(' ').length, status: 'pending' }));
@@ -208,8 +213,13 @@ let wakeLock;
 const keepAwake = async on => { try { if (on) wakeLock = await navigator.wakeLock?.request('screen'); else { await wakeLock?.release(); wakeLock = null; } } catch {} };
 document.addEventListener('visibilitychange', () => { if (gen && document.visibilityState === 'visible') keepAwake(true); });
 
+// Queue: books get a `queued` timestamp; when one finishes, the oldest queued book starts automatically
+const queuedCount = () => books.filter(b => b.queued).length;
+async function setQueued(id, on) { const b = await getBook(id); b.queued = on ? Date.now() : 0; await putBook(b); }
+
 async function generate(bookId) {
   if (gen) return;
+  let finished = false;
   persist();
   gen = { bookId, stop: false, msg: 'Starting the voice engine…' };
   keepAwake(true);
@@ -217,6 +227,7 @@ async function generate(bookId) {
   try {
     await loadModel();
     const book = await getBook(bookId);
+    if (book.queued) { book.queued = 0; await putBook(book); }
     const todo = (await getChunks(bookId)).filter(c => c.status !== 'done');
     book.failed = 0;
     const all = await getChunks(bookId);
@@ -240,13 +251,15 @@ async function generate(bookId) {
         console.warn('chunk failed', c.idx, r.message);
       }
     }
+    finished = !gen.stop;
     status(book.done === book.total ? `“${book.title}” is ready and saved on this device. ✓` : book.failed ? `${book.failed} part(s) failed. Tap “Retry failed parts”.` : 'Generation paused. You can resume any time.', book.failed ? 'bad' : 'ok');
   } catch (e) {
     status(`Could not generate audio: ${e.message}\n(The voice model needs an internet connection the first time.)`, 'bad');
   } finally {
     gen = null;
-    keepAwake(false);
-    render();
+    const next = finished && (await allBooks()).filter(b => b.queued).sort((x, y) => x.queued - y.queued)[0];
+    if (next) generate(next.id);   // keeps the screen awake and carries on with the queue
+    else { keepAwake(false); render(); }
   }
 }
 
@@ -428,6 +441,7 @@ document.addEventListener('click', async e => {
     if (act === 'resume') { togglePlay(); view = 'player'; render(); }
     if (act === 'open') { await loadBook(id); view = 'player'; render(); }
     if (act === 'gen') generate(id);
+    if (act === 'queue' || act === 'unqueue') { await setQueued(id, act === 'queue'); render(); }
     if (act === 'stop' && gen) { gen.stop = true; render(); }
     if (act === 'preview') previewVoice(id);
     if (act === 'toggle') togglePlay();

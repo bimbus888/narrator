@@ -1,6 +1,6 @@
 // Offline support: the app files are cached on install and served from the cache first,
 // refreshed in the background when online. Audio itself lives in IndexedDB, not here.
-const CACHE = 'narrator-v3';
+const CACHE = 'narrator-v4';
 const SHELL = ['./', 'index.html', 'app.js', 'lib.js', 'tts-worker.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png',
   'vendor/kokoro.web.js', 'vendor/lamejs.js', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs'];
 
