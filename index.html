@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Narrator</title>
+<meta name="description" content="Turn PDFs into audiobooks on your own device. Free, private, works offline.">
+<meta name="theme-color" content="#121116">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Narrator">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-180.png">
+<style>
+:root {
+  --bg: #121116; --card: #1d1c23; --line: #2c2a33; --text: #ece9e4; --muted: #9a96a0;
+  --accent: #e0a458; --accent-ink: #1a1408; --ok: #7cc49a; --bad: #e57a6e;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) {
+  :root { --bg: #f6f3ee; --card: #fff; --line: #e4dfd6; --text: #1d1b19; --muted: #6f6a63; --accent: #b4702a; --accent-ink: #fff; --ok: #2f7d52; --bad: #b6463a; color-scheme: light; }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; -webkit-tap-highlight-color: transparent; }
+main { max-width: 640px; margin: 0 auto; padding: calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 96px); }
+h1 { font: 600 28px/1.2 Georgia, "Times New Roman", serif; margin: 8px 0 16px; letter-spacing: -.01em; }
+h2 { font-size: 15px; color: var(--muted); font-weight: 600; margin: 24px 0 8px; text-transform: uppercase; letter-spacing: .06em; }
+button, .btn { font: inherit; font-size: 15px; border: 1px solid var(--line); background: var(--card); color: var(--text); border-radius: 10px; padding: 9px 14px; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; min-height: 40px; }
+button.primary, .btn.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+button.danger { color: var(--bad); }
+button:disabled { opacity: .45; cursor: default; }
+select { font: inherit; font-size: 15px; background: var(--card); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; min-height: 40px; max-width: 100%; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.muted { color: var(--muted); font-size: 14px; }
+.ok { color: var(--ok); } .bad { color: var(--bad); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 12px; margin-bottom: 10px; display: flex; gap: 12px; }
+.card .body { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.card .title { font-weight: 600; overflow-wrap: anywhere; }
+.cover { width: 56px; height: 78px; border-radius: 6px; object-fit: cover; background: var(--line); flex: none; display: grid; place-items: center; font: 600 24px Georgia, serif; color: var(--muted); }
+.clickable { cursor: pointer; }
+.bar { height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--accent); }
+.resume { width: 100%; justify-content: flex-start; padding: 14px; margin-bottom: 8px; }
+#status:empty { display: none; }
+#status { padding: 10px 12px; border-radius: 10px; background: var(--card); border: 1px solid var(--line); margin: 10px 0; white-space: pre-wrap; }
+nav { position: fixed; left: 0; right: 0; bottom: 0; display: flex; justify-content: center; gap: 4px; padding: 8px 8px calc(env(safe-area-inset-bottom) + 8px); background: color-mix(in srgb, var(--bg) 88%, transparent); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border-top: 1px solid var(--line); }
+nav button { flex: 1; max-width: 200px; border: 0; background: none; flex-direction: column; gap: 0; font-size: 13px; color: var(--muted); }
+nav button[aria-current="true"] { color: var(--accent); }
+nav svg { width: 22px; height: 22px; }
+/* player */
+.player { display: flex; flex-direction: column; align-items: center; gap: 14px; text-align: center; }
+.player .cover { width: 160px; height: 224px; font-size: 64px; border-radius: 10px; box-shadow: 0 10px 30px #0006; }
+.player .ptitle { font: 600 21px/1.25 Georgia, serif; overflow-wrap: anywhere; }
+input[type=range] { width: 100%; accent-color: var(--accent); height: 28px; }
+.times { display: flex; justify-content: space-between; width: 100%; font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.controls { display: flex; align-items: center; justify-content: center; gap: 28px; }
+.controls button { border: 0; background: none; padding: 6px; }
+.controls .skip svg { width: 40px; height: 40px; }
+.controls .play { width: 84px; height: 84px; border-radius: 50%; background: var(--accent); color: var(--accent-ink); justify-content: center; }
+.controls .play svg { width: 40px; height: 40px; }
+.speeds { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; }
+.speeds button { min-width: 54px; justify-content: center; padding: 6px 8px; }
+.speeds button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+label.file input { display: none; }
+</style>
+</head>
+<body>
+<main><div id="status" role="status"></div><div id="view"></div></main>
+<nav>
+  <button data-view="library"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 19V5a2 2 0 0 1 2-2h12v16H6a2 2 0 0 0-2 2Zm0 0a2 2 0 0 0 2 2h12"/></svg>Library</button>
+  <button data-view="player"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M4 14v-2a8 8 0 0 1 16 0v2M4 14h3v6H5a1 1 0 0 1-1-1v-5Zm16 0h-3v6h2a1 1 0 0 0 1-1v-5Z"/></svg>Player</button>
+  <button data-view="downloads"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12m0 0-4-4m4 4 4-4M5 21h14"/></svg>Downloads</button>
+</nav>
+<audio id="audio" preload="auto"></audio>
+<script type="module" src="app.js"></script>
+</body>
+</html>
