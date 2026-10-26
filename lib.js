@@ -7,8 +7,8 @@ export const mp3Seconds = bytes => (bytes * 8) / (BITRATE * 1000);
 export const MAX_PART = 300;                // chars per TTS call (model limit is ~510 phoneme tokens)
 export const CHUNK_CHARS = 1200;            // chars per stored/retryable audio chunk
 
-// pdf.js text items {str,x,y,w,h} -> lines [{text,size}]
-export function itemsToLines(items) {
+// pdf.js text items {str,x,y,w,h} -> lines [{text,size}]; words: Set of real words (vendor/ligature-words.txt)
+export function itemsToLines(items, words) {
   const lines = [];
   let cur = null;
   for (const it of items) {
@@ -24,13 +24,62 @@ export function itemsToLines(items) {
       lines.push(cur);
     }
   }
-  return lines.map(l => ({ text: fixLigatures(l.text).replace(/\s+/g, ' ').trim(), size: l.h })).filter(l => l.text);
+  return lines.map(l => ({ text: fixLigatures(l.text, words).replace(/\s+/g, ' ').trim(), size: l.h })).filter(l => l.text);
 }
 
-// ponytail: broken PDF fonts map the "fi"/"ff" ligatures to U+0000. Guess from position:
-// word end or before "e" -> ff (off, staff, effect, offer), otherwise fi (final, find, profit)
-function fixLigatures(t) {
-  return t.replace(/\u0000(?![a-z])/g, 'ff').replace(/(?<=[a-z])\u0000(?=e)/g, 'ff').replace(/\u0000/g, 'fi');
+// Some PDF fonts turn the fi, ff, ffi, fl and ffl ligatures into one unknown symbol (U+0000).
+// Try each and keep the one that makes a real word: "o#ce" -> office, "#ow" -> flow, "sta#" -> staff.
+const LIGATURES = ['fi', 'ff', 'ffi', 'fl', 'ffl'];
+
+// the word list has base forms only, so also accept common endings: identified -> identify, offers -> offer
+const ENDINGS = [['ies', 'y'], ['ied', 'y'], ['ier', 'y'], ['ily', 'y'], ['iness', 'y'], ['s', ''], ['es', ''], ['ed', ''], ['ed', 'e'], ['d', ''],
+  ['ing', ''], ['ing', 'e'], ['ly', ''], ['ness', ''], ['ment', ''], ['ments', ''], ['able', ''], ['ably', ''], ['ally', 'al']];
+const isDerived = (w, words) => ENDINGS.some(([end, add]) => w.endsWith(end) && words.has(w.slice(0, -end.length) + add));
+
+// how well s reads as English around positions [a, b): a whole real word beats any word inside it
+function wordCover(s, a, b, words) {
+  const word = s.replace(/[^a-z]/g, '');
+  if (word.length === s.length && words.has(word)) return 101;            // exact dictionary word
+  if (word.length === s.length && isDerived(word, words)) return 100;     // a dictionary word plus an ending
+  let best = 0;
+  for (let st = 0; st <= a; st++) for (let en = s.length; en >= b && en - st > best; en--) if (words.has(s.slice(st, en))) best = en - st;
+  return best;
+}
+
+function fixLigatures(t, words) {
+  return t.replace(/[A-Za-z]*\u0000[A-Za-z\u0000]*/g, function fix(word) {
+    const i = word.indexOf('\u0000');
+    if (i < 0) return word;
+    const lower = word.toLowerCase();
+    let lig = null, score = 0;
+    if (words) for (const l of LIGATURES) {
+      const s = wordCover(lower.slice(0, i) + l + lower.slice(i + 1).replace(/\u0000/g, 'fi'), i, i + l.length, words);
+      if (s > score) { lig = l; score = s; }
+    }
+    // unknown word (e.g. a name): "ff" at the end of a word (Smirnoff), otherwise "fi"
+    lig ??= /[a-z]/i.test(word[i - 1] || '') && !/[a-z]/i.test(word[i + 1] || '') ? 'ff' : 'fi';
+    if (/[A-Z]/.test(word) && word === word.toUpperCase()) lig = lig.toUpperCase();
+    return fix(word.slice(0, i) + lig + word.slice(i + 1));
+  });
+}
+
+// Text from earlier versions guessed broken ligatures as "fi" ("ofi", "difierent") or "ff" ("identiffed").
+// Returns the corrected text, so those parts can be re-voiced.
+export function refixLigatures(text, words) {
+  return text.replace(/[A-Za-z]*f[fi][A-Za-z]*/g, word => {
+    const lower = word.toLowerCase();
+    for (const { index: i } of lower.matchAll(/f(?=[fi])/g)) {
+      const asIs = wordCover(lower, i, i + 2, words);
+      let best = null, score = 0;
+      for (const l of LIGATURES.filter(l => l !== lower.slice(i, i + 2))) {
+        const sc = wordCover(lower.slice(0, i) + l + lower.slice(i + 2), i, i + l.length, words);
+        if (sc > score) { best = l; score = sc; }
+      }
+      // only when the current spelling is clearly worse ("fit" must not become "flit")
+      if (best && (asIs === 0 || score >= asIs + 2)) return word.slice(0, i) + (word === word.toUpperCase() ? best.toUpperCase() : best) + word.slice(i + 2);
+    }
+    return word;
+  });
 }
 
 // Text-based PDF or scanned images? (scanned PDFs have almost no extractable text)

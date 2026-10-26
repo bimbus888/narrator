@@ -1,5 +1,5 @@
 import * as pdfjs from './vendor/pdf.min.mjs';
-import { itemsToLines, looksScanned, pagesToSections, chapterTimes, makeChunks, mp3Seconds, id3Tag, readId3Meta, fmtTime, titleFromFilename } from './lib.js';
+import { itemsToLines, refixLigatures, looksScanned, pagesToSections, chapterTimes, makeChunks, mp3Seconds, id3Tag, readId3Meta, fmtTime, titleFromFilename } from './lib.js';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -38,6 +38,9 @@ const allBooks = () => tx('books', 'readonly', s => req(s.getAll())).then(b => b
 const getChunks = id => tx('chunks', 'readonly', s => req(s.getAll(range(id))));
 const getAudio = id => tx('audio', 'readonly', s => req(s.getAll(range(id))));
 
+// real words, used to repair the fi/ff/fl letter pairs some PDFs scramble (see lib.js)
+const ligWords = fetch(new URL('./vendor/ligature-words.txt', import.meta.url)).then(r => r.text()).then(t => new Set(t.split('\n'))).catch(() => null);
+
 const persist = () => navigator.storage?.persist?.().catch(() => {});
 
 // ---------- UI state
@@ -66,8 +69,12 @@ function bookState(b) {
   }
   if (ready(b)) {
     const p = position(b);
+    const fix = !b.redo ? '' : b.queued && gen ? `<div class="muted">Pronunciation fix queued.</div>
+      <div class="row"><button data-act="unqueue" data-id="${b.id}">Remove from queue</button></div>`
+      : `<div class="muted">${b.redo} part${b.redo > 1 ? 's' : ''} had misread words (like “off” read as “ofi”). Re-voicing them takes about ${fmtTime(b.redo * 105)}; the book stays playable meanwhile.</div>
+      <div class="row"><button class="primary" data-act="${gen ? 'queue' : 'gen'}" data-id="${b.id}">${gen ? 'Add fix to queue' : 'Fix pronunciation'}</button></div>`;
     return `<div class="muted">${fmtTime(b.seconds)} · ${p ? pct(p, b.seconds) + '% listened' : 'Not started'}</div>
-      <div class="ok muted">✓ Downloaded · plays offline</div>`;
+      <div class="ok muted">✓ Downloaded · plays offline</div>${fix}`;
   }
   if (b.queued && gen) return `<div class="muted">Queued: starts automatically when the book before it finishes.</div>
     <div class="row"><button data-act="unqueue" data-id="${b.id}">Remove from queue</button></div>`;
@@ -138,13 +145,14 @@ async function downloadsHTML() {
 // ---------- adding a PDF
 // -> { pdf, pages: [[{text,size}]], outline: [{title, page}] (the PDF's bookmarks, if any) }
 async function readPdf(blob) {
+  const words = await ligWords;
   const pdf = await pdfjs.getDocument({ data: new Uint8Array(await blob.arrayBuffer()) }).promise;
   const pages = [];
   for (let i = 1; i <= pdf.numPages; i++) {
     const tc = await (await pdf.getPage(i)).getTextContent();
     pages.push(itemsToLines(tc.items.filter(it => 'str' in it).map(it => ({
       str: it.str, x: it.transform[4], y: it.transform[5], w: it.width, h: Math.hypot(it.transform[2], it.transform[3]) || it.height,
-    }))));
+    })), words));
     if (i % 10 === 0) status(`Reading page ${i} of ${pdf.numPages}…`);
   }
   let items = (await pdf.getOutline().catch(() => null)) || [];
@@ -159,19 +167,43 @@ async function readPdf(blob) {
   return { pdf, pages, outline };
 }
 
-// Books made before chapters came from PDF bookmarks: fix their chapter times without regenerating audio
-async function repairChapters(book) {
-  if (book.imported || book.chaptersV >= 2 || !ready(book)) return;
-  const file = await tx('pdfs', 'readonly', s => req(s.get(book.id)));
-  if (!file) return;
-  status(`Updating the chapter list for “${book.title}”…`);
+const chunkRecords = (bookId, chunks) => chunks.map((c, idx) => ({ bookId, idx, ...c, chars: c.parts.join(' ').length, status: 'pending' }));
+
+// Bring books made by earlier versions up to date (chapters from bookmarks, fi/ff/fl repairs),
+// regenerating as little audio as possible. retime: recompute chapter times after parts were re-voiced.
+async function upgradeBook(book, { retime = false } = {}) {
+  const needsLig = !book.ligV, needsChapters = !(book.chaptersV >= 2) || retime;
+  if (book.imported || (!needsLig && !needsChapters)) return;
+  const file = await tx('pdfs', 'readonly', s => req(s.get(book.id))), words = await ligWords;
+  if (!file || !words) return;
+  status(`Updating “${book.title}”…`);
   const { pages, outline } = await readPdf(file);
-  if (outline.length >= 2) {
-    const times = chapterTimes(pagesToSections(pages, book.title, outline), await getChunks(book.id));
-    if (times.length >= 2) book.chapters = times;
+  const sections = pagesToSections(pages, book.title, outline);
+  if (!book.done) {   // nothing generated yet: just rebuild it
+    const { chunks, chapters } = makeChunks(sections);
+    Object.assign(book, { chapters, total: chunks.length, failed: 0, chaptersV: 2, ligV: 1 });
+    await tx(['books', 'chunks'], 'readwrite', (bs, cs) => { cs.delete(range(book.id)); chunkRecords(book.id, chunks).forEach(c => cs.put(c)); bs.put(book); });
+    return status('');
   }
-  book.chaptersV = 2;
-  await putBook(book);
+  let chunks = await getChunks(book.id);
+  const changed = [];
+  if (needsLig) {   // re-voice only parts with misread words; their old audio keeps playing until then
+    chunks = chunks.map(c => {
+      const parts = c.parts.map(p => refixLigatures(p, words));
+      if (parts.join('\n') === c.parts.join('\n')) return c;
+      const fixed = { ...c, parts, chars: parts.join(' ').length, redo: c.status === 'done' || c.redo };
+      changed.push(fixed);
+      return fixed;
+    });
+    book.redo = chunks.filter(c => c.redo).length;
+    book.ligV = 1;
+  }
+  if (needsChapters && ready(book) && outline.length >= 2) {
+    const times = chapterTimes(sections, chunks);
+    if (times.length >= 2) book.chapters = times;
+    book.chaptersV = 2;
+  }
+  await tx(['books', 'chunks'], 'readwrite', (bs, cs) => { changed.forEach(c => cs.put(c)); bs.put(book); });
   status('');
 }
 
@@ -194,10 +226,10 @@ async function addPdf(file) {
     cover = c.toDataURL('image/jpeg', 0.7);
   } catch (e) { console.warn('cover', e); }
   const id = crypto.randomUUID();
-  const book = { id, title, created: Date.now(), pages: pdf.numPages, voice: 'bm_lewis', cover, chapters, chaptersV: 2, total: chunks.length, done: 0, failed: 0, bytes: 0, seconds: 0 };
+  const book = { id, title, created: Date.now(), pages: pdf.numPages, voice: 'bm_lewis', cover, chapters, chaptersV: 2, ligV: 1, total: chunks.length, done: 0, failed: 0, bytes: 0, seconds: 0 };
   await tx(['books', 'chunks', 'pdfs'], 'readwrite', (bs, cs, ps) => {
     bs.put(book);
-    chunks.forEach((c, idx) => cs.put({ bookId: id, idx, ...c, chars: c.parts.join(' ').length, status: 'pending' }));
+    chunkRecords(id, chunks).forEach(c => cs.put(c));
     ps.put(file, id);
   });
   const words = chunks.reduce((n, c) => n + c.parts.join(' ').split(/\s+/).length, 0);
@@ -233,7 +265,8 @@ function showProgress() {
   gen.pct = (100 * (charsBefore + charsDone)) / charsAll;
   const elapsed = performance.now() - t0;   // first sentences include GPU warm-up, so wait before estimating
   gen.eta = charsDone && elapsed > 60000 ? (elapsed / charsDone) * (charsAll - charsBefore - charsDone) / 1000 : 0;
-  gen.msg = `Generating ${gen.pct.toFixed(1)}%${book.seconds ? ` · ${fmtTime(book.seconds)} of audio ready` : ''}`;
+  gen.msg = ready(book) ? `Fixing pronunciation: ${book.redo} part${book.redo === 1 ? '' : 's'} to go`
+    : `Generating ${gen.pct.toFixed(1)}%${book.seconds ? ` · ${fmtTime(book.seconds)} of audio ready` : ''}`;
   throttledRender();
 }
 
@@ -250,7 +283,7 @@ async function setQueued(id, on) { const b = await getBook(id); b.queued = on ? 
 
 async function generate(bookId) {
   if (gen) return;
-  let finished = false;
+  let finished = false, redid = false;
   persist();
   gen = { bookId, stop: false, msg: 'Starting the voice engine…' };
   keepAwake(true);
@@ -259,21 +292,23 @@ async function generate(bookId) {
     await loadModel();
     const book = await getBook(bookId);
     if (book.queued) { book.queued = 0; await putBook(book); }
-    const todo = (await getChunks(bookId)).filter(c => c.status !== 'done');
+    const todo = (await getChunks(bookId)).filter(c => c.status !== 'done' || c.redo);
     book.failed = 0;
     const all = await getChunks(bookId);
     Object.assign(gen, {
       book, t0: performance.now(), charsDone: 0,
       charsAll: all.reduce((n, c) => n + c.chars, 0),
-      charsBefore: all.reduce((n, c) => n + (c.status === 'done' ? c.chars : 0), 0),
+      charsBefore: all.reduce((n, c) => n + (c.status === 'done' && !c.redo ? c.chars : 0), 0),
     });
     showProgress();
     for (const c of todo) {
       if (gen.stop) break;
       const r = await ask({ type: 'chunk', parts: c.parts, heading: c.heading, voice: book.voice });
       if (r.blob) {
-        Object.assign(c, { status: 'done', bytes: r.blob.size, seconds: mp3Seconds(r.blob.size), error: null });
-        book.done++; book.bytes += r.blob.size; book.seconds += c.seconds;
+        const wasRedo = c.redo, old = wasRedo ? { bytes: c.bytes, seconds: c.seconds } : { bytes: 0, seconds: 0 };
+        Object.assign(c, { status: 'done', redo: false, bytes: r.blob.size, seconds: mp3Seconds(r.blob.size), error: null });
+        if (wasRedo) { book.redo--; redid = true; } else book.done++;
+        book.bytes += c.bytes - old.bytes; book.seconds += c.seconds - old.seconds;
         await tx(['chunks', 'audio', 'books'], 'readwrite', (cs, as, bs) => { cs.put(c); as.put(r.blob, [bookId, c.idx]); bs.put(book); });
       } else {
         Object.assign(c, { status: 'failed', error: r.message });
@@ -283,12 +318,12 @@ async function generate(bookId) {
       }
     }
     finished = !gen.stop;
-    status(book.done === book.total ? `“${book.title}” is ready and saved on this device. ✓` : book.failed ? `${book.failed} part(s) failed. Tap “Retry failed parts”.` : 'Generation paused. You can resume any time.', book.failed ? 'bad' : 'ok');
+    status(book.done === book.total && book.failed ? `${book.failed} part(s) failed. Tap the button to retry.` : book.done === book.total ? `“${book.title}” is ready and saved on this device. ✓` : book.failed ? `${book.failed} part(s) failed. Tap “Retry failed parts”.` : 'Generation paused. You can resume any time.', book.failed ? 'bad' : 'ok');
   } catch (e) {
     status(`Could not generate audio: ${e.message}\n(The voice model needs an internet connection the first time.)`, 'bad');
   } finally {
     gen = null;
-    if (finished) await getBook(bookId).then(repairChapters).catch(console.warn);
+    if (finished) await getBook(bookId).then(b => upgradeBook(b, { retime: redid && b.chapters.some(c => c.start != null) })).catch(console.warn);
     const next = finished && (await allBooks()).filter(b => b.queued).sort((x, y) => x.queued - y.queued)[0];
     if (next) generate(next.id);   // keeps the screen awake and carries on with the queue
     else { keepAwake(false); render(); }
@@ -519,7 +554,7 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
 }
 (async () => {
-  for (const b of await allBooks()) await repairChapters(b).catch(e => { console.warn('chapter repair', e); status(''); });
+  for (const b of await allBooks()) await upgradeBook(b).catch(e => { console.warn('upgrade', e); status(''); });
   const last = ls.get('last');
   if (last) {
     const b = await getBook(last);

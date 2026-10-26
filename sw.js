@@ -1,8 +1,8 @@
 // Offline support: the app files are cached on install and served from the cache first,
 // refreshed in the background when online. Audio itself lives in IndexedDB, not here.
-const CACHE = 'narrator-v5';
+const CACHE = 'narrator-v6';
 const SHELL = ['./', 'index.html', 'app.js', 'lib.js', 'tts-worker.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png',
-  'vendor/kokoro.web.js', 'vendor/lamejs.js', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs'];
+  'vendor/kokoro.web.js', 'vendor/ligature-words.txt', 'vendor/lamejs.js', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs'];
 
 self.addEventListener('install', e => e.waitUntil(caches.open(CACHE).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())));
 self.addEventListener('activate', e => e.waitUntil(

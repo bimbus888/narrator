@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { itemsToLines, looksScanned, pagesToSections, chapterTimes, splitSentences, makeChunks, id3Tag, readId3Meta, fmtTime, titleFromFilename, MAX_PART, mp3Seconds } from '../lib.js';
+import { readFileSync } from 'node:fs';
+import { itemsToLines, refixLigatures, looksScanned, pagesToSections, chapterTimes, splitSentences, makeChunks, id3Tag, readId3Meta, fmtTime, titleFromFilename, MAX_PART, mp3Seconds } from '../lib.js';
 
 const body = 'The quick brown fox jumps over the lazy dog near the river bank at dawn.';
 const page = (n, extra = []) => [
@@ -58,10 +59,24 @@ test('wrapped headings join with a space, "CHAPTER 3" + title with a full stop',
   assert.equal(secs[0].title, 'CHAPTER 3. The Acquisition Process');
 });
 
-test('broken "fi"/"ff" ligatures are repaired', () => {
-  const fix = str => itemsToLines([{ str, x: 0, y: 0, w: 50, h: 10 }])[0].text;
-  assert.equal(fix('the \u0000nal step, a pro\u0000t'), 'the final step, a profit');
-  assert.equal(fix('time o\u0000 from work, with a\u0000ection'), 'time off from work, with affection');
+const WORDS = new Set(readFileSync(new URL('../vendor/ligature-words.txt', import.meta.url), 'utf8').split('\n'));
+
+test('broken fi/ff/ffi/fl/ffl ligatures are resolved to real words', () => {
+  const fix = str => itemsToLines([{ str, x: 0, y: 0, w: 50, h: 10 }], WORDS)[0].text;
+  const cases = { 'o\u0000': 'off', 'sta\u0000': 'staff', 'o\u0000ce': 'office', '\u0000ow': 'flow', '\u0000rst': 'first',
+    'di\u0000erent': 'different', 'pro\u0000t': 'profit', 'nonpro\u0000t': 'nonprofit', 'in\u0000uence': 'influence', 'a\u0000liate': 'affiliate',
+    'shu\u0000e': 'shuffle', '\u0000y': 'fly', '\u0000at': 'flat', 'co\u0000ee': 'coffee', 'di\u0000cult': 'difficult', 'identi\u0000ed': 'identified',
+    'Smirno\u0000': 'Smirnoff', 'stu\u0000ed': 'stuffed', 'mu\u0000er': 'muffler', 'O\u0000ICE': 'OFFICE' };
+  for (const [broken, want] of Object.entries(cases)) assert.equal(fix(broken), want, broken.replace('\u0000', '#'));
+  assert.equal(fix('the \u0000nal step'), 'the final step', 'works inside a sentence');
+  assert.equal(itemsToLines([{ str: 'o\u0000 we go', x: 0, y: 0, w: 50, h: 10 }])[0].text, 'off we go', 'sensible guess without the word list');
+});
+
+test('old "fi" guesses in stored text are corrected, real fi words are left alone', () => {
+  assert.equal(refixLigatures('Time ofi from work, the stafi and difierent ofice.', WORDS), 'Time off from work, the staff and different office.');
+  assert.equal(refixLigatures('suficient trafic, oficial stufing, a mufier', WORDS), 'sufficient traffic, official stuffing, a muffler');
+  assert.equal(refixLigatures('A fit, profitable, final first fight.', WORDS), 'A fit, profitable, final first fight.');
+  assert.equal(refixLigatures('He identiffed the staff offer.', WORDS), 'He identified the staff offer.');
 });
 
 test('PDF bookmarks define chapters; reader-guide headings and front matter are ignored', () => {
