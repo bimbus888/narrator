@@ -66,7 +66,8 @@ No paid API is used anywhere. The only internet use is the first-time download o
 - **Voice:** Lewis (the default) and George are the closest free, legally licensed British male narrators. They are clear and pleasant, but not an Attenborough-quality performance. Fable and Daniel are alternatives.
 - **iPhone background playback** relies on Safari's standard audio support. It is designed to keep playing with the screen locked, and the whole book is one continuous audio file so iOS never has to start a new track in the background. **This has not been tested on a real iPhone yet** (see below). If iOS ever stops it, the exported MP3 also plays in **BookPlayer** (a free, open-source iPhone audiobook app) as a fallback.
 - **Scanned PDFs** (photos of pages) have no text. The app detects this and tells you to run OCR first (for example the free OCRmyPDF).
-- **Text cleanup is heuristic.** Two-column layouts, footnotes, tables and front matter (copyright pages) are read as they appear. Chapters come from large headings and "Chapter N" lines, so some books get extra subsection "chapters", which only affects the chapter list.
+- **Chapters** come from the PDF's own bookmarks when it has them (most published e-books do); the title page, copyright, contents and index are then skipped. PDFs without bookmarks fall back to guessing from large headings, which can add extra subsection "chapters".
+- **Text cleanup is heuristic.** Two-column layouts, footnotes and tables are read as they appear.
 - Very occasionally a broken PDF font turns "ff" into "fi" (for example "afiection").
 - iPhone storage: about 22 MB per hour of audio.
 

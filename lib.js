@@ -24,8 +24,13 @@ export function itemsToLines(items) {
       lines.push(cur);
     }
   }
-  // ponytail: broken PDF fonts often map the "fi" ligature to U+0000; "fi" is the usual culprit
-  return lines.map(l => ({ text: l.text.replace(/\u0000/g, 'fi').replace(/\s+/g, ' ').trim(), size: l.h })).filter(l => l.text);
+  return lines.map(l => ({ text: fixLigatures(l.text).replace(/\s+/g, ' ').trim(), size: l.h })).filter(l => l.text);
+}
+
+// ponytail: broken PDF fonts map the "fi"/"ff" ligatures to U+0000. Guess from position:
+// word end or before "e" -> ff (off, staff, effect, offer), otherwise fi (final, find, profit)
+function fixLigatures(t) {
+  return t.replace(/\u0000(?![a-z])/g, 'ff').replace(/(?<=[a-z])\u0000(?=e)/g, 'ff').replace(/\u0000/g, 'fi');
 }
 
 // Text-based PDF or scanned images? (scanned PDFs have almost no extractable text)
@@ -35,11 +40,15 @@ export function looksScanned(pages) {
 }
 
 const norm = s => s.toLowerCase().replace(/\d+/g, '#').replace(/\s+/g, ' ').trim();
-const PAGE_NUM = /^(page\s*)?(\d+|[ivxlcdm]+)(\s*(of|\/)\s*\d+)?$/i;
+// lowercase roman numerals only: a lone capital I, M, C... is far more often a decorative drop cap
+const PAGE_NUM = /^((?:page|Page|PAGE)\s*)?(\d+|[ivxlcdm]+|[IVXLCDM]{2,})(\s*(of|\/)\s*\d+)?$/;
 const HEADING_RE = /^((chapter|part|book)\s+(\d+|[ivxlc]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s*([:.]|$)|(prologue|epilogue|introduction|preface|foreword|conclusion|afterword|appendix)\b)/i;
 
-// pages: [[{text,size}]] -> sections [{title,text}]
-export function pagesToSections(pages, bookTitle) {
+// Front matter that is not worth listening to and the index (only skipped when the PDF has bookmarks naming them)
+const SKIP_SECTION = /^(cover|title( page)?|half title|copyright|contents|table of contents|index)$/i;
+
+// pages: [[{text,size}]], outline: [{title, page}] (PDF bookmarks, 1-based pages) -> sections [{title,text}]
+export function pagesToSections(pages, bookTitle, outline = []) {
   // Repeated running headers/footers: top/bottom 2 lines recurring on many pages
   const edgeCount = new Map();
   const edgeLines = p => [...p.slice(0, 2), ...p.slice(-2)];
@@ -53,35 +62,76 @@ export function pagesToSections(pages, bookTitle) {
   const isHeading = ({ text: t, size }) => t.length <= 80 && /[a-z].*[a-z]/i.test(t) && !/[,;]$/.test(t) &&
     (size >= body * 1.25 || (HEADING_RE.test(t) && t.length <= 60));
 
-  const lines = [];
-  for (const p of pages) p.forEach((l, i) => {
-    if (PAGE_NUM.test(l.text)) return;
+  const kept = pages.map(p => p.filter((l, i) => {
+    if (PAGE_NUM.test(l.text)) return false;
     const atEdge = i < 2 || i >= p.length - 2;
-    if (atEdge && !isHeading(l) && edgeCount.get(norm(l.text)) >= minRepeat) return;
-    lines.push(l);
-  });
+    return !(atEdge && !isHeading(l) && edgeCount.get(norm(l.text)) >= minRepeat);
+  }));
 
-  // ponytail: font-size + "Chapter N" heuristic, ignores PDF outline/bookmarks. Add outline if headings get missed.
-  const sections = [{ title: bookTitle, text: '' }];
-  let prevHeading = false, dropCap = '';
-  for (const l of lines) {
-    const heading = isHeading(l);
-    if (!heading && l.size >= body * 1.25 && /^[A-Z]$/.test(l.text)) { dropCap = l.text; continue; } // decorative first letter
-    const t = dropCap + l.text, cur = sections.at(-1);
-    dropCap = '';
+  // Bookmarks are the author's own chapter list, so trust them over guessing from font sizes.
+  // ponytail: chapters start at page granularity; text before the first bookmark (the cover) is dropped
+  const marks = outline.filter(m => m.page >= 1 && m.page <= pages.length).sort((a, b) => a.page - b.page);
+  if (marks.length >= 2) {
+    return marks.map((m, i) => {
+      const lines = kept.slice(m.page - 1, (marks[i + 1]?.page ?? pages.length + 1) - 1).flat();
+      while (lines.length && isHeading(lines[0])) lines.shift();   // the printed heading duplicates the title
+      return { title: m.title, text: joinLines(lines, body) };
+    }).filter(sec => !SKIP_SECTION.test(sec.title.trim()));
+  }
+
+  const sections = [{ title: bookTitle, lines: [] }];
+  let prevHeading = false;
+  for (const l of kept.flat()) {
+    const heading = isHeading(l), cur = sections.at(-1);
     if (heading) {
       // "Chapter 3" + "The Title" -> "Chapter 3. The Title"; a heading wrapped over two lines is joined with a space
-      if (prevHeading) cur.title = (cur.title + (/(^(chapter|part|book)\s+\S+|\d)$/i.test(cur.title) ? '. ' : ' ') + t).slice(0, 160);
-      else if (sections.length === 1 && !cur.text) cur.title = t;
-      else sections.push({ title: t, text: '' });
-    } else if (cur.text.endsWith('-')) {
-      cur.text = /^[a-z]/.test(t) ? cur.text.slice(0, -1) + t : cur.text + t;   // re-join hyphenated word
-    } else {
-      cur.text = cur.text ? cur.text + ' ' + t : t;
-    }
+      if (prevHeading) cur.title = (cur.title + (/(^(chapter|part|book)\s+\S+|\d)$/i.test(cur.title) ? '. ' : ' ') + l.text).slice(0, 160);
+      else if (sections.length === 1 && !cur.lines.length) cur.title = l.text;
+      else sections.push({ title: l.text, lines: [] });
+    } else cur.lines.push(l);
     prevHeading = heading;
   }
-  return sections;
+  return sections.map(sec => ({ title: sec.title, text: joinLines(sec.lines, body) }));
+}
+
+function joinLines(lines, body) {
+  let text = '', dropCap = '', wait = 0;
+  for (const l of lines) {
+    // Decorative first letter: attach it to the next line that starts mid-word ("S" + "oon I was"),
+    // which may come after an epigraph printed in between
+    if (l.size >= body * 1.25 && /^[A-Z]$/.test(l.text)) { dropCap = l.text; wait = 8; continue; }
+    let t = l.text;
+    if (dropCap && /^[a-z]/.test(t) && !/[a-z,;-]$/.test(text)) { t = dropCap + t; dropCap = ''; }   // not mid-sentence
+    else if (dropCap && --wait <= 0) dropCap = '';
+    if (text.endsWith('-')) text = /^[a-z]/.test(t) ? text.slice(0, -1) + t : text + t;   // re-join hyphenated word
+    else text = text ? text + ' ' + t : t;
+  }
+  return text;
+}
+
+// Repair chapter times for audio already generated: find where each section's opening words
+// were spoken inside the stored chunks. chunks: [{parts, seconds}] in order -> [{title, start}]
+export function chapterTimes(sections, chunks) {
+  // older text-cleanup versions differ slightly (ligatures, drop caps), so compare loosely and try a few probes
+  const loose = s => s.replace(/\s+/g, ' ').replace(/ff/g, 'fi').trim();
+  let t = 0;
+  const spans = chunks.map(c => { const text = loose(c.parts.join(' ')); const span = { text, start: t, seconds: c.seconds || 0 }; t += span.seconds; return span; });
+  const out = [];
+  let from = 0;
+  for (const sec of sections) {
+    const text = loose(sec.text);
+    for (const k of [0, 60, 150, 300]) {
+      const probe = text.slice(k, k + 40);
+      if (probe.length < 15) break;
+      const i = spans.findIndex((s, n) => n >= from && s.text.includes(probe));
+      if (i < 0) continue;
+      const sp = spans[i], pos = Math.max(0, sp.text.indexOf(probe) - k);
+      out.push({ title: sec.title, start: sp.start + (pos / sp.text.length) * sp.seconds });
+      from = i;
+      break;
+    }
+  }
+  return out;
 }
 
 const ABBR = /\b(mr|mrs|ms|dr|prof|st|vs|etc|e\.g|i\.e|no|fig|vol|pp?|inc|ltd|co|jr|sr)\.$/i;

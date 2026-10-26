@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { itemsToLines, looksScanned, pagesToSections, splitSentences, makeChunks, id3Tag, readId3Meta, fmtTime, titleFromFilename, MAX_PART, mp3Seconds } from '../lib.js';
+import { itemsToLines, looksScanned, pagesToSections, chapterTimes, splitSentences, makeChunks, id3Tag, readId3Meta, fmtTime, titleFromFilename, MAX_PART, mp3Seconds } from '../lib.js';
 
 const body = 'The quick brown fox jumps over the lazy dog near the river bank at dawn.';
 const page = (n, extra = []) => [
@@ -58,8 +58,45 @@ test('wrapped headings join with a space, "CHAPTER 3" + title with a full stop',
   assert.equal(secs[0].title, 'CHAPTER 3. The Acquisition Process');
 });
 
-test('broken "fi" ligature is repaired', () => {
-  assert.equal(itemsToLines([{ str: 'the \u0000nal step', x: 0, y: 0, w: 50, h: 10 }])[0].text, 'the final step');
+test('broken "fi"/"ff" ligatures are repaired', () => {
+  const fix = str => itemsToLines([{ str, x: 0, y: 0, w: 50, h: 10 }])[0].text;
+  assert.equal(fix('the \u0000nal step, a pro\u0000t'), 'the final step, a profit');
+  assert.equal(fix('time o\u0000 from work, with a\u0000ection'), 'time off from work, with affection');
+});
+
+test('PDF bookmarks define chapters; reader-guide headings and front matter are ignored', () => {
+  const pages = [
+    [{ text: 'Copyright 2011 by Someone. All rights reserved.', size: 11 }],
+    [{ text: 'One', size: 30 }, { text: 'The Toms Story', size: 20 }, { text: 'I', size: 40 }, { text: 'Be the change you want', size: 11 }, { text: 'to see. —GANDHI', size: 11 }, { text: 'n 2006 I went to Argentina.', size: 11 }],
+    [{ text: body, size: 11 }],
+    [{ text: 'Two', size: 30 }, { text: 'Find Your Story', size: 20 }, { text: body, size: 11 }],
+    [{ text: 'chapter one: the Toms story', size: 20 }, { text: 'What would you do?', size: 11 }],
+  ];
+  const outline = [{ title: 'Copyright', page: 1 }, { title: 'One: The Toms Story', page: 2 }, { title: 'Two: Find Your Story', page: 4 }, { title: 'Reader’s Guide', page: 5 }];
+  const secs = pagesToSections(pages, 'T', outline);
+  assert.deepEqual(secs.map(s => s.title), ['One: The Toms Story', 'Two: Find Your Story', 'Reader’s Guide']);
+  assert.ok(secs[0].text.startsWith('Be the change you want to see. —GANDHI In 2006 I went'), 'printed heading dropped, drop cap skips the epigraph');
+  assert.ok(secs[0].text.includes('lazy dog'), 'chapter runs until the next bookmark');
+  assert.ok(secs[2].text.startsWith('What would you do?'));
+});
+
+test('chapter times are recovered from already-generated audio', () => {
+  const chunks = [
+    { parts: ['Old title.', 'Copyright text here.'], seconds: 10 },
+    { parts: ['Soon I was back in Los Angeles with my bags.', 'More words follow here.'], seconds: 20 },
+    { parts: ['End of one.', 'Today we find your story together, friends.'], seconds: 30 },
+    { parts: ['n 2006 I took some time ofi from work and then I travelled to Argentina where I met Alejo, who showed me the alpargata.'], seconds: 40 },
+  ];
+  const times = chapterTimes([
+    { title: 'One', text: 'Soon I was back in Los Angeles with my bags. More words follow here.' },
+    { title: 'Two', text: 'Today we find your story together, friends.' },
+    { title: 'Missing', text: 'This sentence was never generated anywhere at all.' },
+    { title: 'Changed opening', text: 'In 2006 I took some time off from work and then I travelled to Argentina where I met Alejo, who showed me the alpargata.' },
+  ], chunks);
+  assert.deepEqual(times.map(t => t.title), ['One', 'Two', 'Changed opening'], 'still found when older audio has "ofi" and a lost drop cap');
+  assert.ok(Math.abs(times[2].start - 60) < 2);
+  assert.equal(times[0].start, 10);
+  assert.ok(times[1].start > 30 + 5 && times[1].start < 60, 'inside the third chunk, after "End of one."');
 });
 
 test('scanned detection', () => {

@@ -1,5 +1,5 @@
 import * as pdfjs from './vendor/pdf.min.mjs';
-import { itemsToLines, looksScanned, pagesToSections, makeChunks, mp3Seconds, id3Tag, readId3Meta, fmtTime, titleFromFilename } from './lib.js';
+import { itemsToLines, looksScanned, pagesToSections, chapterTimes, makeChunks, mp3Seconds, id3Tag, readId3Meta, fmtTime, titleFromFilename } from './lib.js';
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdf.worker.min.mjs', import.meta.url).href;
 
@@ -136,10 +136,9 @@ async function downloadsHTML() {
 }
 
 // ---------- adding a PDF
-async function addPdf(file) {
-  persist();
-  status('Opening PDF…');
-  const pdf = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+// -> { pdf, pages: [[{text,size}]], outline: [{title, page}] (the PDF's bookmarks, if any) }
+async function readPdf(blob) {
+  const pdf = await pdfjs.getDocument({ data: new Uint8Array(await blob.arrayBuffer()) }).promise;
   const pages = [];
   for (let i = 1; i <= pdf.numPages; i++) {
     const tc = await (await pdf.getPage(i)).getTextContent();
@@ -148,11 +147,43 @@ async function addPdf(file) {
     }))));
     if (i % 10 === 0) status(`Reading page ${i} of ${pdf.numPages}…`);
   }
+  let items = (await pdf.getOutline().catch(() => null)) || [];
+  if (items.length === 1 && items[0].items?.length) items = items[0].items;   // a single top-level book entry
+  const outline = [];
+  for (const o of items) {
+    try {
+      const dest = typeof o.dest === 'string' ? await pdf.getDestination(o.dest) : o.dest;
+      outline.push({ title: o.title.trim(), page: (await pdf.getPageIndex(dest[0])) + 1 });
+    } catch {}
+  }
+  return { pdf, pages, outline };
+}
+
+// Books made before chapters came from PDF bookmarks: fix their chapter times without regenerating audio
+async function repairChapters(book) {
+  if (book.imported || book.chaptersV >= 2 || !ready(book)) return;
+  const file = await tx('pdfs', 'readonly', s => req(s.get(book.id)));
+  if (!file) return;
+  status(`Updating the chapter list for “${book.title}”…`);
+  const { pages, outline } = await readPdf(file);
+  if (outline.length >= 2) {
+    const times = chapterTimes(pagesToSections(pages, book.title, outline), await getChunks(book.id));
+    if (times.length >= 2) book.chapters = times;
+  }
+  book.chaptersV = 2;
+  await putBook(book);
+  status('');
+}
+
+async function addPdf(file) {
+  persist();
+  status('Opening PDF…');
+  const { pdf, pages, outline } = await readPdf(file);
   if (looksScanned(pages)) {
     throw new Error(`This PDF looks like scanned page images, so there is no text to read aloud.\nIt needs OCR (text recognition) first. Free options: on a Mac, open it in Preview and use File › Export (or the free "OCRmyPDF" tool), then add the new PDF here.`);
   }
   const title = titleFromFilename(file.name);
-  const { chunks, chapters } = makeChunks(pagesToSections(pages, title));
+  const { chunks, chapters } = makeChunks(pagesToSections(pages, title, outline));
   let cover = '';
   try {
     const page = await pdf.getPage(1), vp = page.getViewport({ scale: 1 });
@@ -163,7 +194,7 @@ async function addPdf(file) {
     cover = c.toDataURL('image/jpeg', 0.7);
   } catch (e) { console.warn('cover', e); }
   const id = crypto.randomUUID();
-  const book = { id, title, created: Date.now(), pages: pdf.numPages, voice: 'bm_lewis', cover, chapters, total: chunks.length, done: 0, failed: 0, bytes: 0, seconds: 0 };
+  const book = { id, title, created: Date.now(), pages: pdf.numPages, voice: 'bm_lewis', cover, chapters, chaptersV: 2, total: chunks.length, done: 0, failed: 0, bytes: 0, seconds: 0 };
   await tx(['books', 'chunks', 'pdfs'], 'readwrite', (bs, cs, ps) => {
     bs.put(book);
     chunks.forEach((c, idx) => cs.put({ bookId: id, idx, ...c, chars: c.parts.join(' ').length, status: 'pending' }));
@@ -257,6 +288,7 @@ async function generate(bookId) {
     status(`Could not generate audio: ${e.message}\n(The voice model needs an internet connection the first time.)`, 'bad');
   } finally {
     gen = null;
+    if (finished) await getBook(bookId).then(repairChapters).catch(console.warn);
     const next = finished && (await allBooks()).filter(b => b.queued).sort((x, y) => x.queued - y.queued)[0];
     if (next) generate(next.id);   // keeps the screen awake and carries on with the queue
     else { keepAwake(false); render(); }
@@ -487,6 +519,7 @@ if ('serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
 }
 (async () => {
+  for (const b of await allBooks()) await repairChapters(b).catch(e => { console.warn('chapter repair', e); status(''); });
   const last = ls.get('last');
   if (last) {
     const b = await getBook(last);
