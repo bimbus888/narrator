@@ -3,7 +3,7 @@ import { itemsToLines, refixLigatures, looksScanned, pagesToSections, chapterTim
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdf.worker.min.mjs', import.meta.url).href;
 
-const VERSION = 8;   // shown on the Downloads page, so it's easy to see whether a phone has the latest version
+const VERSION = 9;   // shown on the Downloads page, so it's easy to see whether a phone has the latest version
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 const audio = $('#audio');
@@ -351,11 +351,20 @@ async function previewVoice(bookId) {
 const speed = () => Number(ls.get('speed')) || 1;
 // Saved position to restore. iPhone Safari only loads audio once play is pressed and may ignore
 // an early jump, so keep re-applying it on every media event until it has really landed.
-let pendingSeek = null, seekTries = 0;
+let pendingSeek = null, seekTries = 0, resumed = null;   // resumed: {at, until} to catch a player that slips back
 function applyPendingSeek(ev) {
+  if (pendingSeek === null && resumed && ev === 'timeupdate' && performance.now() < resumed.until && audio.currentTime < resumed.at - 20) {
+    plog(`position slipped back to ${fmtTime(audio.currentTime)}, re-applying ${fmtTime(resumed.at)}`);
+    pendingSeek = resumed.at; resumed = null;
+  }
   if (pendingSeek === null || audio.readyState < 1) return;
   if (audio.duration) pendingSeek = Math.min(pendingSeek, audio.duration - 1);
-  if (Math.abs(audio.currentTime - pendingSeek) < 1.5) { plog(`${ev}: resumed at ${fmtTime(audio.currentTime)}`); pendingSeek = null; return; }
+  if (Math.abs(audio.currentTime - pendingSeek) < 1.5) {
+    plog(`${ev}: resumed at ${fmtTime(audio.currentTime)}`);
+    if (pendingSeek > 30) resumed = { at: pendingSeek, until: performance.now() + 20000 };
+    pendingSeek = null;
+    return;
+  }
   if (++seekTries > 80) { plog(`${ev}: gave up jumping to ${fmtTime(pendingSeek)}, playing from ${fmtTime(audio.currentTime)}`); pendingSeek = null; return; }
   const end = audio.seekable.length ? fmtTime(audio.seekable.end(audio.seekable.length - 1)) : 'none';
   plog(`${ev}: at ${fmtTime(audio.currentTime)}, jumping to ${fmtTime(pendingSeek)} (state ${audio.readyState}, seekable to ${end})`);
@@ -376,10 +385,13 @@ async function loadBook(id) {
   const starts = chunks.map(c => { const s = t; t += c.seconds || 0; return s; });
   const chapters = book.chapters.map(ch => ({ title: ch.title, start: ch.start ?? starts[ch.chunk] ?? 0 }));
   if (current) URL.revokeObjectURL(current.url);
-  current = { book, chapters, url: URL.createObjectURL(new Blob(blobs, { type: 'audio/mpeg' })) };
+  // Normally the service worker serves the audio as a real file (iPhone can only seek in those);
+  // a blob: URL is the fallback for the rare page load the service worker doesn't control
+  const viaSW = !!navigator.serviceWorker?.controller;
+  current = { book, chapters, url: viaSW ? `audio/${encodeURIComponent(id)}.mp3?v=${book.bytes}-${blobs.length}` : URL.createObjectURL(new Blob(blobs, { type: 'audio/mpeg' })) };
   pendingSeek = position(book);
   seekTries = 0;
-  plog(`v${VERSION} opened “${book.title}”, saved position ${fmtTime(pendingSeek)}`);
+  plog(`v${VERSION} opened “${book.title}”, saved position ${fmtTime(pendingSeek)}, ${viaSW ? 'file' : 'blob'} source`);
   // "#t=" makes the player itself start at the saved time; applyPendingSeek is the fallback
   audio.src = current.url + (pendingSeek > 1 ? `#t=${pendingSeek.toFixed(1)}` : '');
   audio.defaultPlaybackRate = audio.playbackRate = speed();
@@ -400,6 +412,7 @@ function seek(t) {
   if (!current) return;
   t = Math.max(0, Math.min(current.book.seconds - 0.5, t));
   if (pendingSeek !== null) pendingSeek = t;
+  resumed = null;   // the user chose this spot, so going backwards is intended
   audio.currentTime = t;
   savePos();
   updatePlayer();

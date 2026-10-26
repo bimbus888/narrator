@@ -1,6 +1,6 @@
 // Offline support: the app files are cached on install and served from the cache first,
-// refreshed in the background when online. Audio itself lives in IndexedDB, not here.
-const CACHE = 'narrator-v8';
+// refreshed in the background when online. Audio lives in IndexedDB and is served below.
+const CACHE = 'narrator-v9';
 const SHELL = ['./', 'index.html', 'app.js', 'lib.js', 'tts-worker.js', 'manifest.webmanifest', 'icon-180.png', 'icon-192.png', 'icon-512.png',
   'vendor/kokoro.web.js', 'vendor/ligature-words.txt', 'vendor/lamejs.js', 'vendor/pdf.min.mjs', 'vendor/pdf.worker.min.mjs'];
 
@@ -18,9 +18,34 @@ const isolate = r => {
   return new Response(r.body, { status: r.status, statusText: r.statusText, headers: h });
 };
 
+// A book's audio is served at audio/<bookId>.mp3 straight from IndexedDB, with HTTP range support.
+// iPhone Safari can't seek inside a large blob: URL (it treats it as an endless live stream),
+// but it plays and seeks normal files fetched in byte ranges.
+const audioBlobs = new Map();   // url -> Blob of the whole book (cheap: references the stored parts)
+const bookAudio = id => new Promise((res, rej) => {
+  const open = indexedDB.open('audiobooks');
+  open.onerror = () => rej(open.error);
+  open.onsuccess = () => {
+    const get = open.result.transaction('audio').objectStore('audio').getAll(IDBKeyRange.bound([id, 0], [id, Infinity]));
+    get.onsuccess = () => res(new Blob(get.result, { type: 'audio/mpeg' }));
+    get.onerror = () => rej(get.error);
+  };
+});
+async function serveAudio(req, url) {
+  if (!audioBlobs.has(url.href)) audioBlobs.set(url.href, await bookAudio(decodeURIComponent(url.pathname.split('/audio/').pop().replace(/\.mp3$/, ''))));
+  const blob = audioBlobs.get(url.href), size = blob.size;
+  const headers = { 'Content-Type': 'audio/mpeg', 'Accept-Ranges': 'bytes' };
+  const m = /bytes=(\d*)-(\d*)/.exec(req.headers.get('range') || '');
+  if (!m) return new Response(blob, { headers: { ...headers, 'Content-Length': String(size) } });
+  const start = m[1] ? +m[1] : Math.max(0, size - +m[2]), end = m[1] && m[2] ? Math.min(+m[2], size - 1) : size - 1;
+  if (start >= size) return new Response(null, { status: 416, headers: { 'Content-Range': `bytes */${size}` } });
+  return new Response(blob.slice(start, end + 1), { status: 206, headers: { ...headers, 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': String(end - start + 1) } });
+}
+
 self.addEventListener('fetch', e => {
   const url = new URL(e.request.url);
   if (e.request.method !== 'GET') return;
+  if (url.origin === location.origin && url.pathname.includes('/audio/')) return e.respondWith(serveAudio(e.request, url));
   if (url.origin === location.origin) {
     // stale-while-revalidate: instant (and offline) from cache, update in background
     e.respondWith(caches.open(CACHE).then(async c => {
