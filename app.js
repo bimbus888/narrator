@@ -346,7 +346,16 @@ async function previewVoice(bookId) {
 
 // ---------- player
 const speed = () => Number(ls.get('speed')) || 1;
-let pendingSeek = null;
+// Saved position to restore. iPhone Safari only loads audio once play is pressed and may ignore
+// an early jump, so keep re-applying it on every media event until it has really landed.
+let pendingSeek = null, seekTries = 0;
+function applyPendingSeek() {
+  if (pendingSeek === null || audio.readyState < 1) return;
+  if (audio.duration) pendingSeek = Math.min(pendingSeek, audio.duration - 1);
+  if (Math.abs(audio.currentTime - pendingSeek) < 1.5 || ++seekTries > 40) { pendingSeek = null; return; }
+  audio.currentTime = pendingSeek;
+}
+for (const ev of ['loadedmetadata', 'loadeddata', 'canplay', 'playing', 'timeupdate', 'seeked']) audio.addEventListener(ev, applyPendingSeek);
 
 async function loadBook(id) {
   if (current?.book.id === id) return;
@@ -358,6 +367,7 @@ async function loadBook(id) {
   if (current) URL.revokeObjectURL(current.url);
   current = { book, chapters, url: URL.createObjectURL(new Blob(blobs, { type: 'audio/mpeg' })) };
   pendingSeek = position(book);
+  seekTries = 0;
   audio.src = current.url;
   audio.defaultPlaybackRate = audio.playbackRate = speed();
   ls.set('last', id);
@@ -422,16 +432,14 @@ function updatePlayer() {
   document.querySelectorAll('[data-speed]').forEach(b => b.setAttribute('aria-pressed', Number(b.dataset.speed) === audio.playbackRate));
 }
 
-audio.addEventListener('loadedmetadata', () => { if (pendingSeek) audio.currentTime = pendingSeek; setPositionState(); });
-audio.addEventListener('seeked', () => { if (pendingSeek !== null && Math.abs(audio.currentTime - pendingSeek) < 2) pendingSeek = null; });
-audio.addEventListener('play', () => { if (pendingSeek !== null && audio.readyState >= 1) audio.currentTime = pendingSeek; lastTick = performance.now(); updatePlayer(); });
+audio.addEventListener('loadedmetadata', setPositionState);
+audio.addEventListener('play', () => { lastTick = performance.now(); updatePlayer(); });
 audio.addEventListener('pause', () => { savePos(); updatePlayer(); });
 audio.addEventListener('ratechange', setPositionState);
 audio.addEventListener('ended', () => { ls.set('pos:' + current.book.id, String(current.book.seconds)); updatePlayer(); });
 audio.addEventListener('timeupdate', () => {
   if (!current) return;
-  if (pendingSeek !== null && pendingSeek === 0 && audio.currentTime > 0) pendingSeek = null;
-  if (pendingSeek !== null) return;
+  if (pendingSeek !== null) return;   // still restoring the saved position
   const now = performance.now();
   if (sleep && !audio.paused) {
     sleep.left -= (now - lastTick) / 1000;
