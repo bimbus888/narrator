@@ -3,6 +3,7 @@ import { itemsToLines, refixLigatures, looksScanned, pagesToSections, chapterTim
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdf.worker.min.mjs', import.meta.url).href;
 
+const VERSION = 8;   // shown on the Downloads page, so it's easy to see whether a phone has the latest version
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 const audio = $('#audio');
@@ -139,7 +140,9 @@ async function downloadsHTML() {
         ${ready(b) ? `<button data-act="export" data-id="${b.id}">Send to phone / export MP3</button>` : ''}
         ${b.done && !b.imported ? `<button data-act="delaudio" data-id="${b.id}">Delete audio</button>` : ''}
         <button class="danger" data-act="delbook" data-id="${b.id}">Delete book</button>
-      </div></div></div>`).join('') || '<p class="muted">Nothing downloaded yet.</p>'}`;
+      </div></div></div>`).join('') || '<p class="muted">Nothing downloaded yet.</p>'}
+    <details class="muted" style="margin-top:24px"><summary>Narrator version ${VERSION} · playback log</summary>
+      <pre style="white-space:pre-wrap;font-size:12px">${esc(playLog.join('\n') || 'Nothing played yet.')}</pre></details>`;
 }
 
 // ---------- adding a PDF
@@ -349,13 +352,21 @@ const speed = () => Number(ls.get('speed')) || 1;
 // Saved position to restore. iPhone Safari only loads audio once play is pressed and may ignore
 // an early jump, so keep re-applying it on every media event until it has really landed.
 let pendingSeek = null, seekTries = 0;
-function applyPendingSeek() {
+function applyPendingSeek(ev) {
   if (pendingSeek === null || audio.readyState < 1) return;
   if (audio.duration) pendingSeek = Math.min(pendingSeek, audio.duration - 1);
-  if (Math.abs(audio.currentTime - pendingSeek) < 1.5 || ++seekTries > 40) { pendingSeek = null; return; }
+  if (Math.abs(audio.currentTime - pendingSeek) < 1.5) { plog(`${ev}: resumed at ${fmtTime(audio.currentTime)}`); pendingSeek = null; return; }
+  if (++seekTries > 80) { plog(`${ev}: gave up jumping to ${fmtTime(pendingSeek)}, playing from ${fmtTime(audio.currentTime)}`); pendingSeek = null; return; }
+  const end = audio.seekable.length ? fmtTime(audio.seekable.end(audio.seekable.length - 1)) : 'none';
+  plog(`${ev}: at ${fmtTime(audio.currentTime)}, jumping to ${fmtTime(pendingSeek)} (state ${audio.readyState}, seekable to ${end})`);
   audio.currentTime = pendingSeek;
 }
-for (const ev of ['loadedmetadata', 'loadeddata', 'canplay', 'playing', 'timeupdate', 'seeked']) audio.addEventListener(ev, applyPendingSeek);
+for (const ev of ['loadedmetadata', 'loadeddata', 'canplay', 'playing', 'timeupdate', 'seeked']) audio.addEventListener(ev, () => applyPendingSeek(ev));
+
+// short log of what the player did, shown on the Downloads page for troubleshooting
+const playLog = [];
+function plog(msg) { playLog.push(new Date().toTimeString().slice(0, 8) + ' ' + msg); if (playLog.length > 40) playLog.shift(); }
+for (const ev of ['play', 'pause', 'error', 'stalled']) audio.addEventListener(ev, () => plog(`${ev} at ${fmtTime(audio.currentTime)}${audio.error ? ' error ' + audio.error.code : ''}`));
 
 async function loadBook(id) {
   if (current?.book.id === id) return;
@@ -368,7 +379,9 @@ async function loadBook(id) {
   current = { book, chapters, url: URL.createObjectURL(new Blob(blobs, { type: 'audio/mpeg' })) };
   pendingSeek = position(book);
   seekTries = 0;
-  audio.src = current.url;
+  plog(`v${VERSION} opened “${book.title}”, saved position ${fmtTime(pendingSeek)}`);
+  // "#t=" makes the player itself start at the saved time; applyPendingSeek is the fallback
+  audio.src = current.url + (pendingSeek > 1 ? `#t=${pendingSeek.toFixed(1)}` : '');
   audio.defaultPlaybackRate = audio.playbackRate = speed();
   ls.set('last', id);
   book.lastPlayed = Date.now();
@@ -558,8 +571,12 @@ if ('serviceWorker' in navigator) {
     sessionStorage.setItem('coi', '1');
     location.reload();
   };
-  if (navigator.serviceWorker.controller) reloadOnce();
-  navigator.serviceWorker.addEventListener('controllerchange', reloadOnce);
+  const hadController = !!navigator.serviceWorker.controller;
+  if (hadController) reloadOnce();
+  // a new version just took over: reload once to start using it, unless that would interrupt something
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (hadController && !busy && !gen && audio.paused) location.reload(); else reloadOnce();
+  });
 }
 (async () => {
   for (const b of await allBooks()) await upgradeBook(b).catch(e => { console.warn('upgrade', e); status(''); });
