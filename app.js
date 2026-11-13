@@ -3,7 +3,7 @@ import { itemsToLines, refixLigatures, looksScanned, pagesToSections, chapterTim
 
 pdfjs.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdf.worker.min.mjs', import.meta.url).href;
 
-const VERSION = 9;   // shown on the Downloads page, so it's easy to see whether a phone has the latest version
+const VERSION = 10;   // shown on the Downloads page, so it's easy to see whether a phone has the latest version
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 const audio = $('#audio');
@@ -93,7 +93,7 @@ function libraryHTML() {
   const last = books.find(b => b.id === ls.get('last') && ready(b));
   return `<h1>Library</h1>
     ${last ? `<button class="primary resume" data-act="resume">▶&nbsp; Resume “${esc(last.title)}” · ${fmtTime(position(last))}</button>` : ''}
-    <label class="btn file ${last ? '' : 'primary'}" style="width:100%;justify-content:center;margin-bottom:6px">＋ Add a PDF<input type="file" accept="application/pdf,.pdf" data-act="upload"></label>
+    <label class="btn file ${last ? '' : 'primary'}" style="width:100%;justify-content:center;margin-bottom:6px">＋ Add a PDF or audiobook MP3<input type="file" accept="application/pdf,.pdf,audio/mpeg,audio/mp3,.mp3" data-act="upload"></label>
     <h2>Your books</h2>
     ${books.length ? books.map(b => `<div class="card">
       <div class="${ready(b) ? 'clickable' : ''}" data-act="${ready(b) ? 'open' : ''}" data-id="${b.id}">${coverHTML(b)}</div>
@@ -130,7 +130,7 @@ async function downloadsHTML() {
   return `<h1>Downloads</h1>
     <p class="muted">${est ? `Using ${mb(est.usage)} of about ${mb(est.quota)} available to this app.` : ''}
       ${persisted ? '<span class="ok">Storage is persistent.</span>' : '<button data-act="persist">Keep my downloads safe</button>'}</p>
-    <label class="btn file" style="width:100%;justify-content:center">⇪ Import an audiobook (.mp3) from another device<input type="file" accept="audio/mpeg,.mp3" data-act="import"></label>
+    <label class="btn file" style="width:100%;justify-content:center">⇪ Import an audiobook (.mp3) from another device<input type="file" accept="audio/mpeg,audio/mp3,.mp3" data-act="import"></label>
     <h2>Books on this device</h2>
     ${books.map((b, i) => `<div class="card">${coverHTML(b)}<div class="body">
       <div class="title">${esc(b.title)}</div>
@@ -559,8 +559,12 @@ document.addEventListener('click', async e => {
 document.addEventListener('change', async e => {
   const el = e.target;
   try {
-    if (el.dataset.act === 'upload' && el.files[0]) { busy = true; await addPdf(el.files[0]).finally(() => busy = false); render(); }
-    if (el.dataset.act === 'import' && el.files[0]) { busy = true; await importMp3(el.files[0]).finally(() => busy = false); render(); }
+    if ((el.dataset.act === 'upload' || el.dataset.act === 'import') && el.files[0]) {
+      const f = el.files[0], isMp3 = /\.mp3$/i.test(f.name) || f.type.startsWith('audio/');
+      busy = true;
+      await (isMp3 ? importMp3(f) : addPdf(f)).finally(() => busy = false);
+      render();
+    }
     if (el.dataset.act === 'voice') { const b = await getBook(el.dataset.id); b.voice = el.value; await putBook(b); }
     if (el.id === 'chapter') seek(current.chapters[el.value].start + 0.01);
     if (el.id === 'sleep') {
